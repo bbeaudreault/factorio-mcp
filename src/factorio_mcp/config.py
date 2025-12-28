@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 
@@ -28,15 +28,19 @@ class FactorioConfig(BaseModel):
         if env_file:
             load_dotenv(env_file, override=True)
 
+        env_values = dotenv_values(env_file) if env_file else {}
+
+        def lookup(key: str, default: str) -> str:
+            if (value := env_values.get(key)) is not None:
+                return value
+
+            import os
+
+            return os.getenv(key, default)
+
         return cls(
-            host=_env("FACTORIO_RCON_HOST", "127.0.0.1"),
-            port=int(_env("FACTORIO_RCON_PORT", "27015")),
-            password=_env("FACTORIO_RCON_PASSWORD", ""),
-            timeout=float(_env("FACTORIO_RCON_TIMEOUT", "5.0")),
+            host=lookup("FACTORIO_RCON_HOST", "127.0.0.1"),
+            port=int(lookup("FACTORIO_RCON_PORT", "27015")),
+            password=lookup("FACTORIO_RCON_PASSWORD", ""),
+            timeout=float(lookup("FACTORIO_RCON_TIMEOUT", "5.0")),
         )
-
-
-def _env(key: str, default: str) -> str:
-    import os
-
-    return os.getenv(key, default)

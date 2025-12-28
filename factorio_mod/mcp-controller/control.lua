@@ -9,6 +9,11 @@ local function respond(payload)
     rcon.print(game.table_to_json(payload))
 end
 
+local function mod_log(message)
+    -- Write namespaced entries to the Factorio log for easier debugging.
+    log("[mcp-controller] " .. message)
+end
+
 local function parse_parameter(parameter)
     -- RCON commands arrive as JSON strings; parse with error handling.
     if parameter == nil or parameter == "" then
@@ -261,16 +266,24 @@ end
 local function register_command(name, handler)
     -- Wire RCON-facing commands to handlers with robust error responses.
     commands.add_command(name, "MCP bridge command", function(command)
+        mod_log(name .. " invoked by " .. (command.player_index and ("player " .. command.player_index) or "server"))
+        if command.parameter and command.parameter ~= "" then
+            mod_log(name .. " payload: " .. command.parameter)
+        end
+
         local payload, err = parse_parameter(command.parameter)
         if payload == nil then
+            mod_log(name .. " parse error: " .. err)
             respond({ ok = false, error = err })
             return
         end
 
         local ok, result = pcall(handler, payload)
         if not ok then
+            mod_log(name .. " handler error: " .. tostring(result))
             respond({ ok = false, error = result })
         else
+            mod_log(name .. " result: " .. game.table_to_json(result))
             respond(result)
         end
     end)
