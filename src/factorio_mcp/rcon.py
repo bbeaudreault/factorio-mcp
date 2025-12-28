@@ -103,7 +103,36 @@ class RconClient:
         length = struct.pack("<i", len(payload))
 
         self._sock.sendall(length + payload)
-        return self._recv_packet(expected_request_id=request_id)
+        return self._recv_response(request_id)
+
+    def _recv_response(self, request_id: int) -> RconPacket:
+        """
+        Read one or more packets for a response.
+
+        Factorio/Source RCON can split large responses into multiple packets; we collect
+        until we encounter an empty body (terminator) or run out of packets.
+        """
+
+        packets: list[RconPacket] = []
+        first = self._recv_packet(expected_request_id=request_id)
+        packets.append(first)
+
+        while True:
+            try:
+                packet = self._recv_packet(expected_request_id=request_id)
+            except (socket.timeout, RconProtocolError):
+                break
+
+            packets.append(packet)
+            if packet.body == "":
+                break
+
+        combined_body = "".join(packet.body for packet in packets)
+        return RconPacket(
+            request_id=first.request_id,
+            packet_type=first.packet_type,
+            body=combined_body,
+        )
 
     def _recv_packet(self, expected_request_id: Optional[int] = None) -> RconPacket:
         assert self._sock is not None

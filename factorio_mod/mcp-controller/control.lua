@@ -154,37 +154,37 @@ local function build_entities(payload)
             table.insert(errors, "Entity definition missing name or position.")
         else
             local direction = definition.direction
-            local allow_build = true
+            local created = surface.create_entity {
+                name = name,
+                position = position,
+                direction = direction,
+                force = player.force,
+                player = player,
+                raise_built = true,
+                fast_replace = true,
+            }
 
-            if consume_items then
+            local built = created ~= nil and created.valid
+
+            if built and consume_items then
+                -- Only consume items after a successful placement; if removal fails, undo the build.
                 local removed = player.remove_item { name = name, count = 1 }
                 if removed == 0 then
-                    allow_build = false
+                    created.destroy { raise_destroy = true }
+                    built = false
                     table.insert(errors, "Missing item: " .. name)
                 end
             end
 
-            if allow_build then
-                local created = surface.create_entity {
-                    name = name,
-                    position = position,
-                    direction = direction,
-                    force = player.force,
-                    player = player,
-                    raise_built = true,
-                    fast_replace = true,
-                }
+            table.insert(results, {
+                name = name,
+                position = position,
+                direction = direction,
+                built = built,
+            })
 
-                table.insert(results, {
-                    name = name,
-                    position = position,
-                    direction = direction,
-                    built = created ~= nil and created.valid,
-                })
-
-                if created == nil then
-                    table.insert(errors, "Failed to create entity: " .. name)
-                end
+            if not built then
+                table.insert(errors, "Failed to create entity: " .. name)
             end
         end
     end

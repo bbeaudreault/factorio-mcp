@@ -1,3 +1,4 @@
+import socket
 import struct
 
 import pytest
@@ -31,7 +32,7 @@ class FakeSocket:
 
     def recv(self, n: int) -> bytes:
         if self._cursor >= len(self._response):
-            return b""
+            raise socket.timeout()
         chunk = self._response[self._cursor : self._cursor + n]
         self._cursor += len(chunk)
         return chunk
@@ -84,3 +85,21 @@ def test_auth_failure(monkeypatch):
     # Call _authenticate directly to isolate auth path
     with pytest.raises(RconAuthError):
         client._authenticate()
+
+
+def test_multi_packet_response(monkeypatch):
+    cfg = FactorioConfig()
+    client = RconClient(cfg)
+    monkeypatch.setattr("factorio_mcp.rcon.random.randint", lambda *_args, **_kwargs: 77)
+
+    body1 = '{"chunk":1,"data":"'
+    body2 = 'abc"}'
+    combined = make_response(77, RconClient.SERVERDATA_RESPONSE_VALUE, body1) + make_response(
+        77, RconClient.SERVERDATA_RESPONSE_VALUE, body2
+    )
+
+    client._sock = FakeSocket(combined)
+    client._authed = True
+
+    result = client.execute_json("mcp-query {}")
+    assert result == {"chunk": 1, "data": "abc"}
