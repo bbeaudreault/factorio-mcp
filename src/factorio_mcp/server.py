@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 
-from factorio_mcp.config import FactorioConfig
 from factorio_mcp import mod_commands
+from factorio_mcp.config import FactorioConfig
 from factorio_mcp.rcon import RconAuthError, RconClient, RconProtocolError
 
 
@@ -91,9 +92,25 @@ class FactorioBridge:
         return self._client.execute_json(command)
 
 
+ENV_FILE_ENV_VAR = "FACTORIO_MCP_ENV_FILE"
+
+
+def _resolve_env_file(env_file: Optional[Path] = None) -> Optional[Path]:
+    """Return the env file from CLI or a fallback environment variable."""
+
+    if env_file:
+        return env_file
+
+    env_value = os.getenv(ENV_FILE_ENV_VAR)
+    if env_value:
+        return Path(env_value).expanduser()
+    return None
+
+
 def build_server(config: FactorioConfig) -> FastMCP:
     bridge = FactorioBridge(config)
-    server = FastMCP("factorio-mcp")
+    server = FastMCP("factorio-mcp", dependencies=("factorio-mcp",))
+    server.factorio_config = config  # type: ignore[attr-defined]
 
     @server.tool()
     async def ping(context: Context) -> Dict[str, Any]:  # noqa: ARG001
@@ -153,6 +170,10 @@ def build_server(config: FactorioConfig) -> FastMCP:
     return server
 
 
+# Expose a module-level FastMCP instance so `mcp run`/`mcp dev` can import it directly.
+app = build_server(FactorioConfig.load(_resolve_env_file()))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Factorio MCP server.")
     parser.add_argument(
@@ -163,7 +184,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = FactorioConfig.load(args.env_file)
+    env_file = _resolve_env_file(args.env_file)
+    config = FactorioConfig.load(env_file)
 
     try:
         server = build_server(config)
