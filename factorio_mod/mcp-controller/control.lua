@@ -1,5 +1,8 @@
 -- Factorio MCP Controller mod
 -- Exposes a small command surface for orchestration via RCON.
+-- APIs referenced were checked against the Factorio 2.0 Lua API:
+-- commands.add_command, game.json_to_table, rcon.print, surface.create_entity,
+-- player.remove_item, player.teleport, and LuaEntity.destroy (raise_destroy).
 
 -- Send a JSON payload back over RCON.
 local function respond(payload)
