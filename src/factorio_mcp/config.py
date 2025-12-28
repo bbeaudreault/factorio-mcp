@@ -19,10 +19,14 @@ class FactorioConfig(BaseModel):
 
     @classmethod
     def load(cls, env_file: Optional[Path] = None) -> "FactorioConfig":
-        """Load configuration from environment variables (optionally an env file)."""
+        """Load configuration from environment variables (optionally an env file).
+
+        The env file is loaded with override semantics so later calls can replace
+        variables that were seeded during earlier imports.
+        """
 
         if env_file:
-            load_dotenv(env_file)
+            load_dotenv(env_file, override=True)
 
         return cls(
             host=_env("FACTORIO_RCON_HOST", "127.0.0.1"),

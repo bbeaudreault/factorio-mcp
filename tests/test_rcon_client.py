@@ -103,3 +103,19 @@ def test_multi_packet_response(monkeypatch):
 
     result = client.execute_json("mcp-query {}")
     assert result == {"chunk": 1, "data": "abc"}
+
+
+def test_leading_empty_packet(monkeypatch):
+    cfg = FactorioConfig()
+    client = RconClient(cfg)
+    monkeypatch.setattr("factorio_mcp.rcon.random.randint", lambda *_args, **_kwargs: 88)
+
+    combined = make_response(88, RconClient.SERVERDATA_RESPONSE_VALUE, "") + make_response(
+        88, RconClient.SERVERDATA_RESPONSE_VALUE, '{"ok":true}'
+    )
+
+    client._sock = FakeSocket(combined)
+    client._authed = True
+
+    result = client.execute_json("mcp-query {}")
+    assert result == {"ok": True}
