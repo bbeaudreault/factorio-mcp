@@ -11,6 +11,11 @@ dependencies = [
     "python-dotenv>=1.0.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+]
+
 [project.scripts]
 factorio-mcp = "factorio_mcp.server:main"
 

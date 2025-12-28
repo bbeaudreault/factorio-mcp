@@ -68,3 +68,14 @@ The MCP server exposes these tools to the LLM:
 ## How it works
 
 The MCP server translates tool calls into RCON commands understood by the mod. The mod executes queries or actions and responds with structured JSON. This split keeps in-game logic authoritative while letting the LLM plan and act through the MCP abstraction.
+
+## Testing
+
+Install dev dependencies and run the Python test suite:
+
+```bash
+pip install .[dev]
+pytest
+```
+
+These tests cover the RCON packet encoding/decoding logic and the JSON command shaping utilities to catch regressions before integrating with a Factorio server.
