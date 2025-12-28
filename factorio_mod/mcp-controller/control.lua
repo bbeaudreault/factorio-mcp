@@ -1,11 +1,13 @@
 -- Factorio MCP Controller mod
 -- Exposes a small command surface for orchestration via RCON.
 
+-- Send a JSON payload back over RCON.
 local function respond(payload)
     rcon.print(game.table_to_json(payload))
 end
 
 local function parse_parameter(parameter)
+    -- RCON commands arrive as JSON strings; parse with error handling.
     if parameter == nil or parameter == "" then
         return nil, "Missing JSON payload."
     end
@@ -19,12 +21,14 @@ local function parse_parameter(parameter)
 end
 
 local function ensure_position(value)
+    -- Basic validation helper for positional tables.
     if value == nil or value.x == nil or value.y == nil then
         error("Position with x/y is required.")
     end
 end
 
 local function list_players()
+    -- Enumerate current players with minimal state so the MCP server can decide targets.
     local players = {}
     for _, player in pairs(game.players) do
         table.insert(players, {
@@ -42,6 +46,7 @@ local function list_players()
 end
 
 local function player_state(payload)
+    -- Return surface/position/health and inventory counts for a specific player.
     if payload.player == nil then
         return { ok = false, error = "player is required" }
     end
@@ -75,6 +80,7 @@ local function player_state(payload)
 end
 
 local function find_resources(payload)
+    -- Locate resource entities near a coordinate (used for planning placements).
     if payload.resource == nil then
         return { ok = false, error = "resource is required" }
     end
@@ -128,6 +134,7 @@ local function find_resources(payload)
 end
 
 local function build_entities(payload)
+    -- Place entities on behalf of a player. Items are only consumed after successful placement.
     if payload.player == nil then
         return { ok = false, error = "player is required" }
     end
@@ -197,6 +204,7 @@ local function build_entities(payload)
 end
 
 local function teleport_player(payload)
+    -- Teleport a player to coordinates (handy for setup and testing).
     if payload.player == nil then
         return { ok = false, error = "player is required" }
     end
@@ -222,6 +230,7 @@ local function teleport_player(payload)
 end
 
 local function handle_query(payload)
+    -- Read-only commands.
     if payload.type == "ping" then
         return { ok = true, type = "ping", tick = game.tick }
     elseif payload.type == "players" then
@@ -236,6 +245,7 @@ local function handle_query(payload)
 end
 
 local function handle_action(payload)
+    -- Commands that change the world or player state.
     if payload.type == "build_entities" then
         return build_entities(payload)
     elseif payload.type == "teleport_player" then
@@ -246,6 +256,7 @@ local function handle_action(payload)
 end
 
 local function register_command(name, handler)
+    -- Wire RCON-facing commands to handlers with robust error responses.
     commands.add_command(name, "MCP bridge command", function(command)
         local payload, err = parse_parameter(command.parameter)
         if payload == nil then
