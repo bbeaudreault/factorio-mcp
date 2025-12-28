@@ -21,10 +21,12 @@ class FactorioConfig(BaseModel):
     def load(cls, env_file: Optional[Path] = None) -> "FactorioConfig":
         """Load configuration from environment variables (optionally an env file).
 
-        The env file is parsed without mutating ``os.environ`` so repeated loads with
-        different files cannot leak values across invocations. Values in the env file
-        take precedence over existing environment variables.
+        The env file is loaded with override semantics so later calls can replace
+        variables that were seeded during earlier imports.
         """
+
+        if env_file:
+            load_dotenv(env_file, override=True)
 
         env_values = dotenv_values(env_file) if env_file else {}
 
