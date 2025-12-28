@@ -45,6 +45,14 @@ factorio-mcp --env-file .env
 
 The process starts a Model Context Protocol server exposing the Factorio tools.
 
+When launching the server via the MCP CLI (`mcp run` / `mcp dev`), set `FACTORIO_MCP_ENV_FILE`
+to point at your `.env` so the module-level FastMCP app can load credentials:
+
+```bash
+export FACTORIO_MCP_ENV_FILE=/path/to/.env
+mcp dev src/factorio_mcp/server.py:app --with-editable .
+```
+
 ### Install the Factorio mod
 
 Copy `factorio_mod/mcp-controller` into your server's `mods/` directory (zip the folder or copy as-is) and restart the server. The mod registers two RCON commands:
