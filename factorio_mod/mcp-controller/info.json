@@ -1,0 +1,9 @@
+{
+  "name": "mcp-controller",
+  "version": "0.1.0",
+  "title": "MCP Controller",
+  "author": "Factorio MCP",
+  "description": "Bridges the Factorio world to a Model Context Protocol server via RCON.",
+  "factorio_version": "1.1",
+  "dependencies": []
+}

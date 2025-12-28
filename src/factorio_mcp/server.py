@@ -1,0 +1,176 @@
+"""Model Context Protocol server that bridges Factorio via RCON."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
+
+from factorio_mcp.config import FactorioConfig
+from factorio_mcp import mod_commands
+from factorio_mcp.rcon import RconAuthError, RconClient, RconProtocolError
+
+
+class Position(BaseModel):
+    x: float
+    y: float
+
+
+class EntityPlacement(BaseModel):
+    name: str = Field(description="Prototype name, e.g. 'electric-mining-drill'.")
+    position: Position = Field(description="Entity placement position.")
+    direction: Optional[int] = Field(
+        default=None,
+        description="Optional Factorio direction integer (0-7).",
+    )
+
+
+class FactorioBridge:
+    """High-level commands that speak to the Factorio MCP mod."""
+
+    def __init__(self, config: FactorioConfig):
+        self.config = config
+        self._client = RconClient(config)
+
+    def ping(self) -> Dict[str, Any]:
+        return self._query({"type": "ping"})
+
+    def list_players(self) -> Dict[str, Any]:
+        return self._query({"type": "players"})
+
+    def player_state(self, player: str) -> Dict[str, Any]:
+        return self._query({"type": "player_state", "player": player})
+
+    def find_resources(
+        self, resource_name: str, position: Position, radius: float, surface: Optional[str]
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": "find_resources",
+            "resource": resource_name,
+            "position": position.model_dump(),
+            "radius": radius,
+        }
+        if surface:
+            payload["surface"] = surface
+        return self._query(payload)
+
+    def build_entities(
+        self,
+        player: str,
+        entities: List[EntityPlacement],
+        consume_items: bool = True,
+    ) -> Dict[str, Any]:
+        payload = {
+            "type": "build_entities",
+            "player": player,
+            "entities": [entity.model_dump() for entity in entities],
+            "consume_items": consume_items,
+        }
+        return self._action(payload)
+
+    def teleport_player(self, player: str, position: Position, surface: Optional[str]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": "teleport_player",
+            "player": player,
+            "position": position.model_dump(),
+        }
+        if surface:
+            payload["surface"] = surface
+        return self._action(payload)
+
+    def _query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        command = mod_commands.build_query(payload)
+        return self._client.execute_json(command)
+
+    def _action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        command = mod_commands.build_action(payload)
+        return self._client.execute_json(command)
+
+
+def build_server(config: FactorioConfig) -> FastMCP:
+    bridge = FactorioBridge(config)
+    server = FastMCP("factorio-mcp")
+
+    @server.tool()
+    async def ping(context: Context) -> Dict[str, Any]:  # noqa: ARG001
+        """Verify that the Factorio MCP mod is reachable via RCON."""
+
+        return bridge.ping()
+
+    @server.tool()
+    async def list_players(context: Context) -> Dict[str, Any]:  # noqa: ARG001
+        """Return a list of online players and their surfaces/positions."""
+
+        return bridge.list_players()
+
+    @server.tool()
+    async def player_state(context: Context, player: str) -> Dict[str, Any]:  # noqa: ARG001
+        """Return state for the given player (position, surface, inventory counts)."""
+
+        return bridge.player_state(player)
+
+    @server.tool()
+    async def find_resources(
+        context: Context,
+        resource_name: str,
+        x: float,
+        y: float,
+        radius: float = 64,
+        surface: Optional[str] = None,
+    ) -> Dict[str, Any]:  # noqa: ARG001
+        """Find resources near a coordinate. Returns up to 128 entries ordered by distance."""
+
+        return bridge.find_resources(resource_name, Position(x=x, y=y), radius, surface)
+
+    @server.tool()
+    async def build_entities(  # noqa: ARG001
+        context: Context,
+        player: str,
+        entities: List[Dict[str, Any]],
+        consume_items: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Ask the Factorio mod to place entities for a player.
+
+        Each entity dictionary should include 'name', 'position' with x/y, and optional 'direction'.
+        """
+
+        parsed_entities = [EntityPlacement.model_validate(entity) for entity in entities]
+        return bridge.build_entities(player, parsed_entities, consume_items=consume_items)
+
+    @server.tool()
+    async def teleport_player(  # noqa: ARG001
+        context: Context, player: str, x: float, y: float, surface: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Teleport a player to coordinates (useful for setup/testing)."""
+
+        return bridge.teleport_player(player, Position(x=x, y=y), surface)
+
+    return server
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the Factorio MCP server.")
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="Optional path to a .env file containing FACTORIO_RCON_* variables.",
+    )
+    args = parser.parse_args()
+
+    config = FactorioConfig.load(args.env_file)
+
+    try:
+        server = build_server(config)
+        server.run()
+    except (RconAuthError, RconProtocolError) as exc:
+        print(json.dumps({"error": str(exc)}))
+
+
+if __name__ == "__main__":
+    main()
