@@ -110,7 +110,9 @@ class RconClient:
         Read one or more packets for a response.
 
         Factorio/Source RCON can split large responses into multiple packets; we collect
-        until we encounter an empty body (terminator) or run out of packets.
+        until we encounter an empty body (terminator) or run out of packets. Some servers
+        may send an initial empty packet before the payload, so we only treat an empty body
+        as a terminator after we've already collected a packet.
         """
 
         packets: list[RconPacket] = []
@@ -124,7 +126,7 @@ class RconClient:
                 break
 
             packets.append(packet)
-            if packet.body == "":
+            if packet.body == "" and len(packets) > 1:
                 break
 
         combined_body = "".join(packet.body for packet in packets)
