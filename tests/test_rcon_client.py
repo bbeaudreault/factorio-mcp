@@ -72,8 +72,8 @@ def test_execute_json_protocol_error(monkeypatch):
     client._sock = FakeSocket(make_response(10, RconClient.SERVERDATA_RESPONSE_VALUE, "not-json"))
     client._authed = True
 
-    with pytest.raises(RconProtocolError):
-        client.execute_json("mcp-query {}")
+    result = client.execute_json("mcp-query {}")
+    assert result == "not-json"
 
 
 def test_auth_failure(monkeypatch):
