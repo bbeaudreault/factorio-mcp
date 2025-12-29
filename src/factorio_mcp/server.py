@@ -276,15 +276,17 @@ class FactorioBridge:
     def _build_lua_command(self, lua_body: str, payload: Optional[Dict[str, Any]] = None) -> str:
         payload_json = json.dumps(payload or {}, separators=(",", ":"))
         lua = f"""
-        local payload = game.json_to_table([[{payload_json}]])
+        local json_to_table = helpers and helpers.json_to_table or game.json_to_table
+        local table_to_json = helpers and helpers.table_to_json or game.table_to_json
+        local payload = json_to_table([[{payload_json}]])
         local function __mcp_main(payload)
             {lua_body}
         end
         local __mcp_ok, __mcp_result = pcall(__mcp_main, payload)
         if not __mcp_ok then
-            rcon.print(game.table_to_json({{ ok = false, error = tostring(__mcp_result) }}))
+            rcon.print(table_to_json({{ ok = false, error = tostring(__mcp_result) }}))
         else
-            rcon.print(game.table_to_json(__mcp_result))
+            rcon.print(table_to_json(__mcp_result))
         end
         """
         normalized = " ".join(lua.split())

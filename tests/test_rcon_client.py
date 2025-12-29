@@ -65,7 +65,7 @@ def test_execute_json_success(monkeypatch):
     assert packet_type == RconClient.SERVERDATA_EXECCOMMAND
 
 
-def test_execute_json_protocol_error(monkeypatch):
+def test_execute_json_non_json_response(monkeypatch):
     cfg = FactorioConfig()
     client = RconClient(cfg)
     monkeypatch.setattr("factorio_mcp.rcon.random.randint", lambda *_args, **_kwargs: 10)
@@ -73,7 +73,18 @@ def test_execute_json_protocol_error(monkeypatch):
     client._authed = True
 
     result = client.execute_json("mcp-query {}")
-    assert result == "not-json"
+    assert result == {"ok": False, "error": "Non-JSON response", "raw_response": "not-json"}
+
+
+def test_execute_json_empty_response(monkeypatch):
+    cfg = FactorioConfig()
+    client = RconClient(cfg)
+    monkeypatch.setattr("factorio_mcp.rcon.random.randint", lambda *_args, **_kwargs: 10)
+    client._sock = FakeSocket(make_response(10, RconClient.SERVERDATA_RESPONSE_VALUE, ""))
+    client._authed = True
+
+    result = client.execute_json("mcp-query {}")
+    assert result == {"ok": False, "error": "Empty response from Factorio"}
 
 
 def test_auth_failure(monkeypatch):
