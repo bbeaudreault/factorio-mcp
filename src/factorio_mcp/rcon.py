@@ -79,20 +79,22 @@ class RconClient:
             raise RconProtocolError("RCON command rejected by server.")
         return packet.body
 
-    def execute_json(self, command: str) -> Any:
+    def execute_json(self, command: str) -> dict[str, Any]:
         """
-        Run a command and return a decoded JSON response when possible.
+        Run a command and return a decoded JSON response.
 
         Some Factorio setups may emit plain text (or even blank) responses. Instead of
-        failing outright, we return the raw body so callers can still surface the RCON
-        output to the LLM.
+        failing outright, we wrap non-JSON responses in a dictionary so callers can
+        still surface the RCON output to the LLM while satisfying type constraints.
         """
 
         body = self.execute(command)
         try:
             return json.loads(body)
         except json.JSONDecodeError:
-            return body
+            if body:
+                return {"ok": False, "error": "Non-JSON response", "raw_response": body}
+            return {"ok": False, "error": "Empty response from Factorio"}
 
     def _authenticate(self) -> None:
         packet = self._send_packet(self.SERVERDATA_AUTH, self.config.password)

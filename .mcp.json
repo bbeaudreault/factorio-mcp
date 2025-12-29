@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+      "factorio": {
+        "type": "stdio",
+        "command": "uv",
+        "args": ["run", "python", "-m", "src.factorio_mcp.server"],
+        "env": {"FACTORIO_MCP_ENV_FILE":"/Users/bbeaudreault/src/fday/factorio-mcp/.env"}
+      }
+    }
+  }
