@@ -1,13 +1,10 @@
 # Factorio MCP
 
-Model Context Protocol server and Factorio mod that allow an LLM to control gameplay through RCON.
+Model Context Protocol server that allows an LLM to control gameplay through RCON.
 
 ## Overview
 
-This project contains two cooperating pieces:
-
-1. **Python MCP server** (`factorio-mcp`) that exposes tools the LLM can call (list players, inspect state, place entities, etc.). The server talks to the Factorio server over RCON.
-2. **Factorio mod** (`mcp-controller`) that accepts those commands and performs the actions inside the game.
+This project is a **Python MCP server** (`factorio-mcp`) that exposes tools the LLM can call (list players, inspect state, place entities, etc.). The server talks directly to the Factorio server over RCON using `/c` Lua commands—no Factorio-side mod is required.
 
 The intended use-case is multiplayer: an LLM plays alongside humans by issuing MCP tool calls that translate into in-game actions.
 
@@ -17,7 +14,7 @@ The intended use-case is multiplayer: an LLM plays alongside humans by issuing M
 
 - Python 3.10+
 - A running Factorio headless server with RCON enabled.
-- Ability to install a Factorio mod on the server.
+- Console commands allowed for RCON (`allow-commands=admins-only` or broader).
 
 ### Configure RCON access
 
@@ -53,29 +50,24 @@ export FACTORIO_MCP_ENV_FILE=/path/to/.env
 mcp dev src/factorio_mcp/server.py:app --with-editable .
 ```
 
-### Install the Factorio mod
+### Server command permissions
 
-Copy `factorio_mod/mcp-controller` into your server's `mods/` directory (zip the folder or copy as-is) and restart the server. The mod registers two RCON commands:
-
-- `mcp-query <json>`
-- `mcp-action <json>`
-
-These commands return JSON via RCON for the MCP server to consume.
+Because the MCP server sends `/c` commands over RCON, your Factorio server must allow console commands for RCON (the default `allow-commands=admins-only` works, since RCON is treated as admin). If your server disables `/c`, enable it on a development server before use.
 
 ## Available tools
 
 The MCP server exposes these tools to the LLM:
 
-- `ping` – verifies connectivity with the mod.
+- `ping` – verifies connectivity with the Factorio server.
 - `list_players` – returns connected players and locations.
 - `player_state(player)` – reports position, surface, health, and main inventory counts for a player.
 - `find_resources(resource_name, x, y, radius, surface?)` – finds resource entities near a point.
-- `build_entities(player, entities, consume_items?)` – asks the mod to place entities on behalf of a player (optionally consuming items from their inventory).
+- `build_entities(player, entities, consume_items?)` – asks the server to place entities on behalf of a player (optionally consuming items from their inventory).
 - `teleport_player(player, x, y, surface?)` – teleports a player (useful for setup/testing).
 
 ## How it works
 
-The MCP server translates tool calls into RCON commands understood by the mod. The mod executes queries or actions and responds with structured JSON. This split keeps in-game logic authoritative while letting the LLM plan and act through the MCP abstraction.
+The MCP server translates tool calls into Lua snippets sent via `/c` over RCON. Each snippet validates inputs, runs the relevant game-side logic, and emits structured JSON back through `rcon.print` for the MCP client to parse.
 
 ## Testing
 

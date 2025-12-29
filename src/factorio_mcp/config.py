@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
 from pydantic import BaseModel, Field
 
 

@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 
-from factorio_mcp import mod_commands
 from factorio_mcp.config import FactorioConfig
 from factorio_mcp.rcon import RconAuthError, RconClient, RconProtocolError
 
@@ -31,33 +30,136 @@ class EntityPlacement(BaseModel):
 
 
 class FactorioBridge:
-    """High-level commands that speak to the Factorio MCP mod."""
+    """High-level commands that speak to Factorio via RCON /c Lua snippets."""
 
     def __init__(self, config: FactorioConfig):
         self.config = config
         self._client = RconClient(config)
 
     def ping(self) -> Dict[str, Any]:
-        return self._query({"type": "ping"})
+        lua_body = "return {ok=true,type='ping',tick=game.tick}"
+        return self._execute_lua(lua_body)
 
     def list_players(self) -> Dict[str, Any]:
-        return self._query({"type": "players"})
+        lua_body = """
+        local players = {}
+        for _, player in pairs(game.players) do
+            players[#players + 1] = {
+                name = player.name,
+                index = player.index,
+                connected = player.connected,
+                afk_time = player.afk_time,
+                online_time = player.online_time,
+                surface = player.surface and player.surface.name or nil,
+                position = player.position,
+            }
+        end
+        return { ok = true, players = players }
+        """
+        return self._execute_lua(lua_body)
 
     def player_state(self, player: str) -> Dict[str, Any]:
-        return self._query({"type": "player_state", "player": player})
+        lua_body = """
+        if payload == nil or payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local inventory = {}
+        local main_inventory = player.get_main_inventory()
+        if main_inventory then
+            for name, count in pairs(main_inventory.get_contents()) do
+                inventory[name] = count
+            end
+        end
+
+        return {
+            ok = true,
+            player = {
+                name = player.name,
+                index = player.index,
+                connected = player.connected,
+                surface = player.surface and player.surface.name or nil,
+                position = player.position,
+                health = player.character and player.character.health or nil,
+                crafting_queue = player.crafting_queue,
+                inventory = inventory,
+            },
+        }
+        """
+        return self._execute_lua(lua_body, {"player": player})
 
     def find_resources(
         self, resource_name: str, position: Position, radius: float, surface: Optional[str]
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
-            "type": "find_resources",
             "resource": resource_name,
             "position": position.model_dump(),
             "radius": radius,
         }
         if surface:
             payload["surface"] = surface
-        return self._query(payload)
+
+        lua_body = """
+        if payload.resource == nil then
+            return { ok = false, error = "resource is required" }
+        end
+
+        if payload.position == nil then
+            return { ok = false, error = "position is required" }
+        end
+
+        if payload.position.x == nil or payload.position.y == nil then
+            return { ok = false, error = "Position with x/y is required." }
+        end
+
+        local radius = payload.radius or 32
+        local surface = game.surfaces[payload.surface or 1]
+        if surface == nil then
+            return { ok = false, error = "surface not found" }
+        end
+
+        local left_top = { x = payload.position.x - radius, y = payload.position.y - radius }
+        local right_bottom = { x = payload.position.x + radius, y = payload.position.y + radius }
+
+        local resources = surface.find_entities_filtered {
+            type = "resource",
+            name = payload.resource,
+            area = { left_top, right_bottom },
+        }
+
+        local results = {}
+        for _, resource in pairs(resources) do
+            results[#results + 1] = {
+                name = resource.name,
+                position = resource.position,
+                amount = resource.amount,
+                surface = resource.surface.name,
+            }
+        end
+
+        table.sort(results, function(a, b)
+            local dx1 = a.position.x - payload.position.x
+            local dy1 = a.position.y - payload.position.y
+            local dx2 = b.position.x - payload.position.x
+            local dy2 = b.position.y - payload.position.y
+            return (dx1 * dx1 + dy1 * dy1) < (dx2 * dx2 + dy2 * dy2)
+        end)
+
+        if #results > 128 then
+            while #results > 128 do
+                table.remove(results)
+            end
+        end
+
+        return { ok = true, results = results, center = payload.position, radius = radius }
+        """
+
+        return self._execute_lua(lua_body, payload)
 
     def build_entities(
         self,
@@ -66,29 +168,130 @@ class FactorioBridge:
         consume_items: bool = True,
     ) -> Dict[str, Any]:
         payload = {
-            "type": "build_entities",
             "player": player,
             "entities": [entity.model_dump() for entity in entities],
             "consume_items": consume_items,
         }
-        return self._action(payload)
+        lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
+        if payload.entities == nil then
+            return { ok = false, error = "entities is required" }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local consume_items = payload.consume_items ~= false
+        local surface = player.surface
+        local results = {}
+        local errors = {}
+
+        for _, definition in pairs(payload.entities) do
+            local name = definition.name
+            local position = definition.position
+
+            if name == nil or position == nil then
+                errors[#errors + 1] = "Entity definition missing name or position."
+            else
+                local direction = definition.direction
+                local created = surface.create_entity {
+                    name = name,
+                    position = position,
+                    direction = direction,
+                    force = player.force,
+                    player = player,
+                    raise_built = true,
+                    fast_replace = true,
+                }
+
+                local built = created ~= nil and created.valid
+
+                if built and consume_items then
+                    local removed = player.remove_item { name = name, count = 1 }
+                    if removed == 0 then
+                        created.destroy { raise_destroy = true }
+                        built = false
+                        errors[#errors + 1] = "Missing item: " .. name
+                    end
+                end
+
+                results[#results + 1] = {
+                    name = name,
+                    position = position,
+                    direction = direction,
+                    built = built,
+                }
+
+                if not built then
+                    errors[#errors + 1] = "Failed to create entity: " .. name
+                end
+            end
+        end
+
+        return {
+            ok = #errors == 0,
+            built = results,
+            errors = errors,
+        }
+        """
+        return self._execute_lua(lua_body, payload)
 
     def teleport_player(self, player: str, position: Position, surface: Optional[str]) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "type": "teleport_player",
-            "player": player,
-            "position": position.model_dump(),
-        }
+        payload: Dict[str, Any] = {"player": player, "position": position.model_dump()}
         if surface:
             payload["surface"] = surface
-        return self._action(payload)
+        lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
 
-    def _query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        command = mod_commands.build_query(payload)
-        return self._client.execute_json(command)
+        if payload.position == nil then
+            return { ok = false, error = "position is required" }
+        end
 
-    def _action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        command = mod_commands.build_action(payload)
+        if payload.position.x == nil or payload.position.y == nil then
+            return { ok = false, error = "Position with x/y is required." }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local surface = payload.surface and game.surfaces[payload.surface] or player.surface
+        if surface == nil then
+            return { ok = false, error = "surface not found" }
+        end
+
+        player.teleport(payload.position, surface)
+        return { ok = true, player = player.name, position = payload.position, surface = surface.name }
+        """
+        return self._execute_lua(lua_body, payload)
+
+    def _build_lua_command(self, lua_body: str, payload: Optional[Dict[str, Any]] = None) -> str:
+        payload_json = json.dumps(payload or {}, separators=(",", ":"))
+        lua = f"""
+        local payload = game.json_to_table([[{payload_json}]])
+        local function __mcp_main(payload)
+            {lua_body}
+        end
+        local __mcp_ok, __mcp_result = pcall(__mcp_main, payload)
+        if not __mcp_ok then
+            rcon.print(game.table_to_json({{ ok = false, error = tostring(__mcp_result) }}))
+        else
+            rcon.print(game.table_to_json(__mcp_result))
+        end
+        """
+        normalized = " ".join(lua.split())
+        return f"/c {normalized}"
+
+    def _execute_lua(self, lua_body: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        command = self._build_lua_command(lua_body, payload)
         return self._client.execute_json(command)
 
 
@@ -114,7 +317,7 @@ def build_server(config: FactorioConfig) -> FastMCP:
 
     @server.tool()
     async def ping(context: Context) -> Dict[str, Any]:  # noqa: ARG001
-        """Verify that the Factorio MCP mod is reachable via RCON."""
+        """Verify that Factorio is reachable via RCON."""
 
         return bridge.ping()
 
@@ -151,7 +354,7 @@ def build_server(config: FactorioConfig) -> FastMCP:
         consume_items: bool = True,
     ) -> Dict[str, Any]:
         """
-        Ask the Factorio mod to place entities for a player.
+        Ask Factorio to place entities for a player via RCON.
 
         Each entity dictionary should include 'name', 'position' with x/y, and optional 'direction'.
         """
