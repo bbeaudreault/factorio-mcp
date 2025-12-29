@@ -31,10 +31,10 @@ def test_ping_sends_lua_command():
 def test_find_resources_embeds_payload_json():
     bridge = _bridge_with_response({"ok": True})
 
-    bridge.find_resources("iron-ore", Position(x=1.5, y=-2.5), 10, surface="nauvis")
+    bridge.find_resources("player1", "iron-ore", Position(x=1.5, y=-2.5), 10)
 
     command = bridge._client.commands[0]  # type: ignore[attr-defined]
     assert '"resource":"iron-ore"' in command
-    assert '"position":{"x":1.5,"y":-2.5}' in command
+    assert '"offset":{"x":1.5,"y":-2.5}' in command
     assert '"radius":10' in command
-    assert '"surface":"nauvis"' in command
+    assert '"player":"player1"' in command
