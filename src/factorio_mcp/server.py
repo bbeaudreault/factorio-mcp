@@ -14,6 +14,12 @@ from pydantic import BaseModel, Field
 from factorio_mcp.config import FactorioConfig
 from factorio_mcp.rcon import RconAuthError, RconClient, RconProtocolError
 
+# Human-like limitation constants
+BUILD_DISTANCE = 6  # Factorio's default build distance in tiles
+VIEWPORT_RADIUS = 100  # Max zoom-out limit (~200 tiles across)
+MOVE_DISTANCE = 50  # Max teleport distance per move
+CHUNK_SIZE = 32  # Factorio chunk size
+
 
 class Position(BaseModel):
     x: float
@@ -119,12 +125,23 @@ class FactorioBridge:
 
         local player_pos = player.position
         local offset = payload.offset or { x = 0, y = 0 }
+        local viewport_radius = payload.viewport_radius or 100
+
+        local offset_dist = math.sqrt((offset.x or 0) * (offset.x or 0) + (offset.y or 0) * (offset.y or 0))
+        if offset_dist > viewport_radius then
+            return {
+                ok = false,
+                error = "Search offset (" .. string.format("%.1f", offset_dist) .. " tiles) is beyond visible viewport (" .. viewport_radius .. " tiles). Use view_map for distant areas.",
+                player_position = player_pos,
+            }
+        end
+
         local center = {
             x = player_pos.x + (offset.x or 0),
             y = player_pos.y + (offset.y or 0),
         }
 
-        local radius = payload.radius or 32
+        local radius = math.min(payload.radius or 32, viewport_radius)
         local surface = player.surface
 
         local left_top = { x = center.x - radius, y = center.y - radius }
@@ -207,6 +224,8 @@ class FactorioBridge:
         local to_build = {}
         local validation_errors = {}
 
+        local build_distance = payload.build_distance or 6
+
         for i, definition in pairs(payload.entities) do
             local name = definition.name
             local rel_position = definition.position
@@ -214,42 +233,47 @@ class FactorioBridge:
             if name == nil or rel_position == nil then
                 validation_errors[#validation_errors + 1] = "Entity " .. i .. ": missing name or position."
             else
-                local direction = definition.direction or 0
-                local abs_position = {
-                    x = player_pos.x + rel_position.x,
-                    y = player_pos.y + rel_position.y,
-                }
-
-                local can_place = surface.can_place_entity {
-                    name = name,
-                    position = abs_position,
-                    direction = direction,
-                    force = player.force,
-                }
-
-                if not can_place then
-                    validation_errors[#validation_errors + 1] = "Cannot place " .. name .. " at offset (" .. rel_position.x .. ", " .. rel_position.y .. ") - invalid terrain or collision"
+                local dist = math.sqrt(rel_position.x * rel_position.x + rel_position.y * rel_position.y)
+                if dist > build_distance then
+                    validation_errors[#validation_errors + 1] = "Entity " .. name .. " at offset (" .. rel_position.x .. ", " .. rel_position.y .. ") is " .. string.format("%.1f", dist) .. " tiles away, max build distance is " .. build_distance .. " tiles"
                 else
-                    if consume_items then
-                        local count = player.get_item_count(name)
-                        local needed = 0
-                        for _, queued in pairs(to_build) do
-                            if queued.name == name then
-                                needed = needed + 1
+                    local direction = definition.direction or 0
+                    local abs_position = {
+                        x = player_pos.x + rel_position.x,
+                        y = player_pos.y + rel_position.y,
+                    }
+
+                    local can_place = surface.can_place_entity {
+                        name = name,
+                        position = abs_position,
+                        direction = direction,
+                        force = player.force,
+                    }
+
+                    if not can_place then
+                        validation_errors[#validation_errors + 1] = "Cannot place " .. name .. " at offset (" .. rel_position.x .. ", " .. rel_position.y .. ") - invalid terrain or collision"
+                    else
+                        if consume_items then
+                            local count = player.get_item_count(name)
+                            local needed = 0
+                            for _, queued in pairs(to_build) do
+                                if queued.name == name then
+                                    needed = needed + 1
+                                end
+                            end
+                            if count <= needed then
+                                validation_errors[#validation_errors + 1] = "Not enough " .. name .. " in inventory (have " .. count .. ", need " .. (needed + 1) .. ")"
                             end
                         end
-                        if count <= needed then
-                            validation_errors[#validation_errors + 1] = "Not enough " .. name .. " in inventory (have " .. count .. ", need " .. (needed + 1) .. ")"
-                        end
                     end
-                end
 
-                to_build[#to_build + 1] = {
-                    name = name,
-                    rel_position = rel_position,
-                    abs_position = abs_position,
-                    direction = direction,
-                }
+                    to_build[#to_build + 1] = {
+                        name = name,
+                        rel_position = rel_position,
+                        abs_position = abs_position,
+                        direction = direction,
+                    }
+                end
             end
         end
 
@@ -365,12 +389,23 @@ class FactorioBridge:
 
         local player_pos = player.position
         local offset = payload.offset or { x = 0, y = 0 }
+        local viewport_radius = payload.viewport_radius or 100
+
+        local offset_dist = math.sqrt((offset.x or 0) * (offset.x or 0) + (offset.y or 0) * (offset.y or 0))
+        if offset_dist > viewport_radius then
+            return {
+                ok = false,
+                error = "Search offset (" .. string.format("%.1f", offset_dist) .. " tiles) is beyond visible viewport (" .. viewport_radius .. " tiles). Use view_map for distant areas.",
+                player_position = player_pos,
+            }
+        end
+
         local center = {
             x = player_pos.x + (offset.x or 0),
             y = player_pos.y + (offset.y or 0),
         }
 
-        local radius = payload.radius or 32
+        local radius = math.min(payload.radius or 32, viewport_radius)
         local surface = player.surface
 
         local left_top = { x = center.x - radius, y = center.y - radius }
@@ -489,8 +524,10 @@ class FactorioBridge:
         local entities = surface.find_entities_filtered(filter)
 
         local results = {}
+        local out_of_reach = {}
         local errors = {}
         local give_items = payload.give_items ~= false
+        local build_distance = payload.build_distance or 6
 
         for _, entity in pairs(entities) do
             if entity.valid and entity.name ~= "character" and entity.minable then
@@ -501,24 +538,34 @@ class FactorioBridge:
                     y = abs_pos.y - player_pos.y,
                 }
 
-                local products = entity.prototype.mineable_properties.products
-                if give_items and products then
-                    for _, product in pairs(products) do
-                        if product.type == "item" then
-                            local count = product.amount or 1
-                            player.insert { name = product.name, count = count }
+                local entity_dist = math.sqrt(rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y)
+                if entity_dist > build_distance then
+                    out_of_reach[#out_of_reach + 1] = {
+                        name = name,
+                        position = rel_pos,
+                        absolute_position = abs_pos,
+                        distance = entity_dist,
+                    }
+                else
+                    local products = entity.prototype.mineable_properties.products
+                    if give_items and products then
+                        for _, product in pairs(products) do
+                            if product.type == "item" then
+                                local count = product.amount or 1
+                                player.insert { name = product.name, count = count }
+                            end
                         end
                     end
+
+                    entity.destroy { raise_destroy = true }
+
+                    results[#results + 1] = {
+                        name = name,
+                        position = rel_pos,
+                        absolute_position = abs_pos,
+                        deconstructed = true,
+                    }
                 end
-
-                entity.destroy { raise_destroy = true }
-
-                results[#results + 1] = {
-                    name = name,
-                    position = rel_pos,
-                    absolute_position = abs_pos,
-                    deconstructed = true,
-                }
             end
         end
 
@@ -526,8 +573,191 @@ class FactorioBridge:
             ok = true,
             deconstructed = results,
             count = #results,
+            out_of_reach = out_of_reach,
+            out_of_reach_count = #out_of_reach,
             player_position = player_pos,
             errors = errors,
+        }
+        """
+        return self._execute_lua(lua_body, payload)
+
+    def move_player(
+        self,
+        player: str,
+        offset: Position,
+        max_distance: float = 50.0,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "player": player,
+            "offset": offset.model_dump(),
+            "max_distance": max_distance,
+        }
+        lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local offset = payload.offset or { x = 0, y = 0 }
+        local max_distance = payload.max_distance or 50
+
+        local dist = math.sqrt((offset.x or 0) * (offset.x or 0) + (offset.y or 0) * (offset.y or 0))
+        if dist > max_distance then
+            return {
+                ok = false,
+                error = "Move distance " .. string.format("%.1f", dist) .. " tiles exceeds maximum of " .. max_distance .. " tiles",
+                player_position = player.position,
+            }
+        end
+
+        local player_pos = player.position
+        local target = {
+            x = player_pos.x + (offset.x or 0),
+            y = player_pos.y + (offset.y or 0),
+        }
+
+        local surface = player.surface
+        local non_colliding = surface.find_non_colliding_position(
+            "character",
+            target,
+            2,
+            0.5
+        )
+
+        if non_colliding == nil then
+            return {
+                ok = false,
+                error = "Cannot move to position - blocked by terrain or entities",
+                player_position = player_pos,
+                attempted_target = target,
+            }
+        end
+
+        player.teleport(non_colliding, surface)
+
+        local final_offset = {
+            x = non_colliding.x - player_pos.x,
+            y = non_colliding.y - player_pos.y,
+        }
+
+        return {
+            ok = true,
+            player = player.name,
+            previous_position = player_pos,
+            new_position = non_colliding,
+            actual_offset = final_offset,
+        }
+        """
+        return self._execute_lua(lua_body, payload)
+
+    def view_map(
+        self,
+        player: str,
+        center: Position,
+        radius: float = 64.0,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "player": player,
+            "center": center.model_dump(),
+            "radius": radius,
+        }
+        lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local center = payload.center
+        if center == nil or center.x == nil or center.y == nil then
+            return { ok = false, error = "center position with x/y is required" }
+        end
+
+        local radius = payload.radius or 64
+        local surface = player.surface
+        local chunk_size = 32
+
+        local min_chunk_x = math.floor((center.x - radius) / chunk_size)
+        local max_chunk_x = math.floor((center.x + radius) / chunk_size)
+        local min_chunk_y = math.floor((center.y - radius) / chunk_size)
+        local max_chunk_y = math.floor((center.y + radius) / chunk_size)
+
+        local chunks = {}
+
+        for cx = min_chunk_x, max_chunk_x do
+            for cy = min_chunk_y, max_chunk_y do
+                local chunk_area = {
+                    left_top = { x = cx * chunk_size, y = cy * chunk_size },
+                    right_bottom = { x = (cx + 1) * chunk_size, y = (cy + 1) * chunk_size },
+                }
+
+                local resources = surface.find_entities_filtered {
+                    type = "resource",
+                    area = { chunk_area.left_top, chunk_area.right_bottom },
+                }
+                local resource_counts = {}
+                for _, res in pairs(resources) do
+                    resource_counts[res.name] = (resource_counts[res.name] or 0) + 1
+                end
+
+                local buildings = surface.find_entities_filtered {
+                    area = { chunk_area.left_top, chunk_area.right_bottom },
+                    force = player.force,
+                }
+                local building_counts = {
+                    total = 0,
+                    assemblers = 0,
+                    inserters = 0,
+                    belts = 0,
+                    power = 0,
+                    mining = 0,
+                    other = 0,
+                }
+                for _, entity in pairs(buildings) do
+                    if entity.valid and entity.name ~= "character" then
+                        building_counts.total = building_counts.total + 1
+                        local etype = entity.type
+                        if etype == "assembling-machine" or etype == "furnace" then
+                            building_counts.assemblers = building_counts.assemblers + 1
+                        elseif etype == "inserter" then
+                            building_counts.inserters = building_counts.inserters + 1
+                        elseif etype == "transport-belt" or etype == "splitter" or etype == "underground-belt" then
+                            building_counts.belts = building_counts.belts + 1
+                        elseif etype == "electric-pole" or etype == "generator" or etype == "solar-panel" or etype == "accumulator" then
+                            building_counts.power = building_counts.power + 1
+                        elseif etype == "mining-drill" then
+                            building_counts.mining = building_counts.mining + 1
+                        else
+                            building_counts.other = building_counts.other + 1
+                        end
+                    end
+                end
+
+                if next(resource_counts) ~= nil or building_counts.total > 0 then
+                    chunks[#chunks + 1] = {
+                        chunk = { x = cx, y = cy },
+                        area = chunk_area,
+                        resources = resource_counts,
+                        buildings = building_counts,
+                    }
+                end
+            end
+        end
+
+        return {
+            ok = true,
+            center = center,
+            radius = radius,
+            player_position = player.position,
+            chunk_count = #chunks,
+            chunks = chunks,
         }
         """
         return self._execute_lua(lua_body, payload)
@@ -603,7 +833,11 @@ def build_server(config: FactorioConfig) -> FastMCP:
         offset_y: float = 0,
         radius: float = 64,
     ) -> Dict[str, Any]:  # noqa: ARG001
-        """Find resources near player. Offset is relative to player position. Returns up to 128 entries."""
+        """Find resources near player within visible viewport. Offset is relative to player position.
+
+        LIMITATION: Search is limited to visible viewport (100 tiles from player).
+        Use view_map for distant areas.
+        Returns up to 128 entries."""
 
         return bridge.find_resources(player, resource_name, Position(x=offset_x, y=offset_y), radius)
 
@@ -616,6 +850,8 @@ def build_server(config: FactorioConfig) -> FastMCP:
     ) -> Dict[str, Any]:
         """
         Place entities for a player at positions RELATIVE to the player's current location.
+
+        LIMITATION: Entities must be within 6 tiles of the player (build distance).
 
         Each entity dictionary should include:
         - 'name': entity prototype name (e.g., 'assembling-machine-3')
@@ -646,10 +882,14 @@ def build_server(config: FactorioConfig) -> FastMCP:
         entity_type: Optional[str] = None,
         entity_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Find all entities near player. Offset is relative to player. Returns up to 200 entries.
+        """Find all entities near player within visible viewport. Offset is relative to player.
+
+        LIMITATION: Search is limited to visible viewport (100 tiles from player).
+        Use view_map for distant areas.
 
         Can filter by entity_type (e.g., 'assembling-machine', 'inserter', 'transport-belt')
         or entity_name (e.g., 'assembling-machine-3', 'fast-inserter').
+        Returns up to 200 entries.
         """
 
         return bridge.find_entities(
@@ -667,7 +907,10 @@ def build_server(config: FactorioConfig) -> FastMCP:
         entity_type: Optional[str] = None,
         entity_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Deconstruct (pick up) all player-owned entities in an area relative to player.
+        """Deconstruct (pick up) player-owned entities in an area relative to player.
+
+        LIMITATION: Only entities within 6 tiles of the player can be deconstructed.
+        Entities beyond build distance are returned in 'out_of_reach' list.
 
         Items are returned to the player's inventory by default (give_items=True).
         Can filter by entity_type or entity_name to only deconstruct specific entities.
@@ -676,6 +919,43 @@ def build_server(config: FactorioConfig) -> FastMCP:
         return bridge.deconstruct_area(
             player, Position(x=offset_x, y=offset_y), radius, give_items, entity_type, entity_name
         )
+
+    @server.tool()
+    async def move_player(  # noqa: ARG001
+        context: Context,
+        player: str,
+        offset_x: float,
+        offset_y: float,
+    ) -> Dict[str, Any]:
+        """Move player to a nearby position (limited to 50 tiles).
+
+        Offset is relative to current player position.
+        Coordinate system: +x is east, +y is south.
+
+        Will find a non-colliding position near the target if the exact spot is blocked.
+        For longer distances, call multiple times.
+        """
+        return bridge.move_player(player, Position(x=offset_x, y=offset_y))
+
+    @server.tool()
+    async def view_map(  # noqa: ARG001
+        context: Context,
+        player: str,
+        center_x: float,
+        center_y: float,
+        radius: float = 64,
+    ) -> Dict[str, Any]:
+        """View a strategic overview of any map area (read-only).
+
+        Returns chunk-based summaries (32x32 tile chunks) with:
+        - Resource counts and types per chunk
+        - Building counts by category (assemblers, inserters, belts, power, mining)
+
+        This is a map view only - you cannot build or interact through this view.
+        The position is absolute (not relative to player).
+        Use move_player to get within build range of an area before interacting.
+        """
+        return bridge.view_map(player, Position(x=center_x, y=center_y), radius)
 
     return server
 
