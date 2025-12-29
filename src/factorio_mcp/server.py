@@ -94,37 +94,41 @@ class FactorioBridge:
         return self._execute_lua(lua_body, {"player": player})
 
     def find_resources(
-        self, resource_name: str, position: Position, radius: float, surface: Optional[str]
+        self, player: str, resource_name: str, offset: Position, radius: float
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
+            "player": player,
             "resource": resource_name,
-            "position": position.model_dump(),
+            "offset": offset.model_dump(),
             "radius": radius,
         }
-        if surface:
-            payload["surface"] = surface
 
         lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
         if payload.resource == nil then
             return { ok = false, error = "resource is required" }
         end
 
-        if payload.position == nil then
-            return { ok = false, error = "position is required" }
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
         end
 
-        if payload.position.x == nil or payload.position.y == nil then
-            return { ok = false, error = "Position with x/y is required." }
-        end
+        local player_pos = player.position
+        local offset = payload.offset or { x = 0, y = 0 }
+        local center = {
+            x = player_pos.x + (offset.x or 0),
+            y = player_pos.y + (offset.y or 0),
+        }
 
         local radius = payload.radius or 32
-        local surface = game.surfaces[payload.surface or 1]
-        if surface == nil then
-            return { ok = false, error = "surface not found" }
-        end
+        local surface = player.surface
 
-        local left_top = { x = payload.position.x - radius, y = payload.position.y - radius }
-        local right_bottom = { x = payload.position.x + radius, y = payload.position.y + radius }
+        local left_top = { x = center.x - radius, y = center.y - radius }
+        local right_bottom = { x = center.x + radius, y = center.y + radius }
 
         local resources = surface.find_entities_filtered {
             type = "resource",
@@ -134,19 +138,23 @@ class FactorioBridge:
 
         local results = {}
         for _, resource in pairs(resources) do
+            local rel_pos = {
+                x = resource.position.x - player_pos.x,
+                y = resource.position.y - player_pos.y,
+            }
             results[#results + 1] = {
                 name = resource.name,
-                position = resource.position,
+                position = rel_pos,
+                absolute_position = resource.position,
                 amount = resource.amount,
-                surface = resource.surface.name,
             }
         end
 
         table.sort(results, function(a, b)
-            local dx1 = a.position.x - payload.position.x
-            local dy1 = a.position.y - payload.position.y
-            local dx2 = b.position.x - payload.position.x
-            local dy2 = b.position.y - payload.position.y
+            local dx1 = a.position.x - offset.x
+            local dy1 = a.position.y - offset.y
+            local dx2 = b.position.x - offset.x
+            local dy2 = b.position.y - offset.y
             return (dx1 * dx1 + dy1 * dy1) < (dx2 * dx2 + dy2 * dy2)
         end)
 
@@ -156,7 +164,13 @@ class FactorioBridge:
             end
         end
 
-        return { ok = true, results = results, center = payload.position, radius = radius }
+        return {
+            ok = true,
+            results = results,
+            player_position = player_pos,
+            search_center = center,
+            radius = radius,
+        }
         """
 
         return self._execute_lua(lua_body, payload)
@@ -188,55 +202,103 @@ class FactorioBridge:
 
         local consume_items = payload.consume_items ~= false
         local surface = player.surface
-        local results = {}
-        local errors = {}
+        local player_pos = player.position
 
-        for _, definition in pairs(payload.entities) do
+        local to_build = {}
+        local validation_errors = {}
+
+        for i, definition in pairs(payload.entities) do
             local name = definition.name
-            local position = definition.position
+            local rel_position = definition.position
 
-            if name == nil or position == nil then
-                errors[#errors + 1] = "Entity definition missing name or position."
+            if name == nil or rel_position == nil then
+                validation_errors[#validation_errors + 1] = "Entity " .. i .. ": missing name or position."
             else
-                local direction = definition.direction
-                local created = surface.create_entity {
-                    name = name,
-                    position = position,
-                    direction = direction,
-                    force = player.force,
-                    player = player,
-                    raise_built = true,
-                    fast_replace = true,
+                local direction = definition.direction or 0
+                local abs_position = {
+                    x = player_pos.x + rel_position.x,
+                    y = player_pos.y + rel_position.y,
                 }
 
-                local built = created ~= nil and created.valid
+                local can_place = surface.can_place_entity {
+                    name = name,
+                    position = abs_position,
+                    direction = direction,
+                    force = player.force,
+                }
 
-                if built and consume_items then
-                    local removed = player.remove_item { name = name, count = 1 }
-                    if removed == 0 then
-                        created.destroy { raise_destroy = true }
-                        built = false
-                        errors[#errors + 1] = "Missing item: " .. name
+                if not can_place then
+                    validation_errors[#validation_errors + 1] = "Cannot place " .. name .. " at offset (" .. rel_position.x .. ", " .. rel_position.y .. ") - invalid terrain or collision"
+                else
+                    if consume_items then
+                        local count = player.get_item_count(name)
+                        local needed = 0
+                        for _, queued in pairs(to_build) do
+                            if queued.name == name then
+                                needed = needed + 1
+                            end
+                        end
+                        if count <= needed then
+                            validation_errors[#validation_errors + 1] = "Not enough " .. name .. " in inventory (have " .. count .. ", need " .. (needed + 1) .. ")"
+                        end
                     end
                 end
 
-                results[#results + 1] = {
+                to_build[#to_build + 1] = {
                     name = name,
-                    position = position,
+                    rel_position = rel_position,
+                    abs_position = abs_position,
                     direction = direction,
-                    built = built,
                 }
+            end
+        end
 
-                if not built then
-                    errors[#errors + 1] = "Failed to create entity: " .. name
-                end
+        if #validation_errors > 0 then
+            return {
+                ok = false,
+                error = "Validation failed - no entities placed",
+                validation_errors = validation_errors,
+                player_position = player_pos,
+            }
+        end
+
+        local results = {}
+        local build_errors = {}
+
+        for _, item in pairs(to_build) do
+            local created = surface.create_entity {
+                name = item.name,
+                position = item.abs_position,
+                direction = item.direction,
+                force = player.force,
+                player = player,
+                raise_built = true,
+            }
+
+            local built = created ~= nil and created.valid
+
+            if built and consume_items then
+                player.remove_item { name = item.name, count = 1 }
+            end
+
+            results[#results + 1] = {
+                name = item.name,
+                relative_position = item.rel_position,
+                absolute_position = item.abs_position,
+                direction = item.direction,
+                built = built,
+            }
+
+            if not built then
+                build_errors[#build_errors + 1] = "Failed to create entity: " .. item.name
             end
         end
 
         return {
-            ok = #errors == 0,
+            ok = #build_errors == 0,
             built = results,
-            errors = errors,
+            player_position = player_pos,
+            errors = build_errors,
         }
         """
         return self._execute_lua(lua_body, payload)
@@ -270,6 +332,203 @@ class FactorioBridge:
 
         player.teleport(payload.position, surface)
         return { ok = true, player = player.name, position = payload.position, surface = surface.name }
+        """
+        return self._execute_lua(lua_body, payload)
+
+    def find_entities(
+        self,
+        player: str,
+        offset: Position,
+        radius: float,
+        entity_type: Optional[str] = None,
+        entity_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "player": player,
+            "offset": offset.model_dump(),
+            "radius": radius,
+        }
+        if entity_type:
+            payload["entity_type"] = entity_type
+        if entity_name:
+            payload["entity_name"] = entity_name
+
+        lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local player_pos = player.position
+        local offset = payload.offset or { x = 0, y = 0 }
+        local center = {
+            x = player_pos.x + (offset.x or 0),
+            y = player_pos.y + (offset.y or 0),
+        }
+
+        local radius = payload.radius or 32
+        local surface = player.surface
+
+        local left_top = { x = center.x - radius, y = center.y - radius }
+        local right_bottom = { x = center.x + radius, y = center.y + radius }
+
+        local filter = {
+            area = { left_top, right_bottom },
+        }
+        if payload.entity_type then
+            filter.type = payload.entity_type
+        end
+        if payload.entity_name then
+            filter.name = payload.entity_name
+        end
+
+        local entities = surface.find_entities_filtered(filter)
+
+        local results = {}
+        for _, entity in pairs(entities) do
+            if entity.valid and entity.name ~= "character" then
+                local rel_pos = {
+                    x = entity.position.x - player_pos.x,
+                    y = entity.position.y - player_pos.y,
+                }
+                results[#results + 1] = {
+                    name = entity.name,
+                    type = entity.type,
+                    position = rel_pos,
+                    absolute_position = entity.position,
+                    direction = entity.direction,
+                    health = entity.health,
+                    unit_number = entity.unit_number,
+                }
+            end
+        end
+
+        table.sort(results, function(a, b)
+            local dx1 = a.position.x - offset.x
+            local dy1 = a.position.y - offset.y
+            local dx2 = b.position.x - offset.x
+            local dy2 = b.position.y - offset.y
+            return (dx1 * dx1 + dy1 * dy1) < (dx2 * dx2 + dy2 * dy2)
+        end)
+
+        if #results > 200 then
+            while #results > 200 do
+                table.remove(results)
+            end
+        end
+
+        return {
+            ok = true,
+            entities = results,
+            player_position = player_pos,
+            search_center = center,
+            radius = radius,
+        }
+        """
+
+        return self._execute_lua(lua_body, payload)
+
+    def deconstruct_area(
+        self,
+        player: str,
+        offset: Position,
+        radius: float,
+        give_items: bool = True,
+        entity_type: Optional[str] = None,
+        entity_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "player": player,
+            "offset": offset.model_dump(),
+            "radius": radius,
+            "give_items": give_items,
+        }
+        if entity_type:
+            payload["entity_type"] = entity_type
+        if entity_name:
+            payload["entity_name"] = entity_name
+
+        lua_body = """
+        if payload.player == nil then
+            return { ok = false, error = "player is required" }
+        end
+
+        local player = game.players[payload.player]
+        if player == nil then
+            return { ok = false, error = "player not found" }
+        end
+
+        local player_pos = player.position
+        local offset = payload.offset or { x = 0, y = 0 }
+        local center = {
+            x = player_pos.x + (offset.x or 0),
+            y = player_pos.y + (offset.y or 0),
+        }
+
+        local radius = payload.radius or 32
+        local surface = player.surface
+
+        local left_top = { x = center.x - radius, y = center.y - radius }
+        local right_bottom = { x = center.x + radius, y = center.y + radius }
+
+        local filter = {
+            area = { left_top, right_bottom },
+            force = player.force,
+        }
+        if payload.entity_type then
+            filter.type = payload.entity_type
+        end
+        if payload.entity_name then
+            filter.name = payload.entity_name
+        end
+
+        local entities = surface.find_entities_filtered(filter)
+
+        local results = {}
+        local errors = {}
+        local give_items = payload.give_items ~= false
+
+        for _, entity in pairs(entities) do
+            if entity.valid and entity.name ~= "character" and entity.minable then
+                local name = entity.name
+                local abs_pos = entity.position
+                local rel_pos = {
+                    x = abs_pos.x - player_pos.x,
+                    y = abs_pos.y - player_pos.y,
+                }
+
+                local products = entity.prototype.mineable_properties.products
+                if give_items and products then
+                    for _, product in pairs(products) do
+                        if product.type == "item" then
+                            local count = product.amount or 1
+                            player.insert { name = product.name, count = count }
+                        end
+                    end
+                end
+
+                entity.destroy { raise_destroy = true }
+
+                results[#results + 1] = {
+                    name = name,
+                    position = rel_pos,
+                    absolute_position = abs_pos,
+                    deconstructed = true,
+                }
+            end
+        end
+
+        return {
+            ok = true,
+            deconstructed = results,
+            count = #results,
+            player_position = player_pos,
+            errors = errors,
+        }
         """
         return self._execute_lua(lua_body, payload)
 
@@ -338,15 +597,15 @@ def build_server(config: FactorioConfig) -> FastMCP:
     @server.tool()
     async def find_resources(
         context: Context,
+        player: str,
         resource_name: str,
-        x: float,
-        y: float,
+        offset_x: float = 0,
+        offset_y: float = 0,
         radius: float = 64,
-        surface: Optional[str] = None,
     ) -> Dict[str, Any]:  # noqa: ARG001
-        """Find resources near a coordinate. Returns up to 128 entries ordered by distance."""
+        """Find resources near player. Offset is relative to player position. Returns up to 128 entries."""
 
-        return bridge.find_resources(resource_name, Position(x=x, y=y), radius, surface)
+        return bridge.find_resources(player, resource_name, Position(x=offset_x, y=offset_y), radius)
 
     @server.tool()
     async def build_entities(  # noqa: ARG001
@@ -356,9 +615,14 @@ def build_server(config: FactorioConfig) -> FastMCP:
         consume_items: bool = True,
     ) -> Dict[str, Any]:
         """
-        Ask Factorio to place entities for a player via RCON.
+        Place entities for a player at positions RELATIVE to the player's current location.
 
-        Each entity dictionary should include 'name', 'position' with x/y, and optional 'direction'.
+        Each entity dictionary should include:
+        - 'name': entity prototype name (e.g., 'assembling-machine-3')
+        - 'position': {x, y} offset from player (e.g., {x: 5, y: 0} = 5 tiles east)
+        - 'direction': optional, 0-15 (0=north, 4=east, 8=south, 12=west)
+
+        Coordinate system: +x is east, +y is south.
         """
 
         parsed_entities = [EntityPlacement.model_validate(entity) for entity in entities]
@@ -371,6 +635,47 @@ def build_server(config: FactorioConfig) -> FastMCP:
         """Teleport a player to coordinates (useful for setup/testing)."""
 
         return bridge.teleport_player(player, Position(x=x, y=y), surface)
+
+    @server.tool()
+    async def find_entities(  # noqa: ARG001
+        context: Context,
+        player: str,
+        offset_x: float = 0,
+        offset_y: float = 0,
+        radius: float = 32,
+        entity_type: Optional[str] = None,
+        entity_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Find all entities near player. Offset is relative to player. Returns up to 200 entries.
+
+        Can filter by entity_type (e.g., 'assembling-machine', 'inserter', 'transport-belt')
+        or entity_name (e.g., 'assembling-machine-3', 'fast-inserter').
+        """
+
+        return bridge.find_entities(
+            player, Position(x=offset_x, y=offset_y), radius, entity_type, entity_name
+        )
+
+    @server.tool()
+    async def deconstruct_area(  # noqa: ARG001
+        context: Context,
+        player: str,
+        offset_x: float = 0,
+        offset_y: float = 0,
+        radius: float = 32,
+        give_items: bool = True,
+        entity_type: Optional[str] = None,
+        entity_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Deconstruct (pick up) all player-owned entities in an area relative to player.
+
+        Items are returned to the player's inventory by default (give_items=True).
+        Can filter by entity_type or entity_name to only deconstruct specific entities.
+        """
+
+        return bridge.deconstruct_area(
+            player, Position(x=offset_x, y=offset_y), radius, give_items, entity_type, entity_name
+        )
 
     return server
 
