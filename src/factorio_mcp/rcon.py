@@ -7,7 +7,7 @@ import random
 import socket
 import struct
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from factorio_mcp.config import FactorioConfig
 
@@ -79,14 +79,20 @@ class RconClient:
             raise RconProtocolError("RCON command rejected by server.")
         return packet.body
 
-    def execute_json(self, command: str) -> dict:
-        """Run a command and parse a JSON response."""
+    def execute_json(self, command: str) -> Any:
+        """
+        Run a command and return a decoded JSON response when possible.
+
+        Some Factorio setups may emit plain text (or even blank) responses. Instead of
+        failing outright, we return the raw body so callers can still surface the RCON
+        output to the LLM.
+        """
 
         body = self.execute(command)
         try:
             return json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise RconProtocolError(f"Expected JSON response from RCON, got: {body}") from exc
+        except json.JSONDecodeError:
+            return body
 
     def _authenticate(self) -> None:
         packet = self._send_packet(self.SERVERDATA_AUTH, self.config.password)
